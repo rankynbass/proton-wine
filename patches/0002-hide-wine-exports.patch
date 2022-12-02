@@ -1,0 +1,25 @@
+From 8cce1c8b7ac3236fdd3420415528ec8c7fb51453 Mon Sep 17 00:00:00 2001
+From: Rankyn Bass <rankyn@proton.me>
+Date: Thu, 1 Dec 2022 19:07:24 -0800
+Subject: [PATCH 2/2] hide-wine-exports
+
+---
+ dlls/ntdll/loader.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 2d652c8fb57..47531dbeb7c 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -109,7 +109,7 @@ struct dll_dir_entry
+ 
+ static struct list dll_dir_list = LIST_INIT( dll_dir_list );  /* extra dirs from LdrAddDllDirectory */
+ 
+-static BOOL hide_wine_exports = FALSE;  /* try to hide ntdll wine exports from applications */
++static BOOL hide_wine_exports = TRUE;  /* try to hide ntdll wine exports from applications */
+ 
+ struct ldr_notification
+ {
+-- 
+2.38.1
+
