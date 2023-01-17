@@ -2706,18 +2706,16 @@ static BOOL WINAPI glxdrv_wglShareLists(struct wgl_context *org, struct wgl_cont
 
     if (share_all_contexts == 1) return TRUE;
 
-    if((org->has_been_current && dest->has_been_current) || dest->has_been_current)
-    {
-        ERR("Could not share display lists, one of the contexts has been current already !\n");
-        return FALSE;
-    }
-    else if(dest->sharing)
+    if(dest->sharing)
     {
         ERR("Could not share display lists because hglrc2 has already shared lists before\n");
         return FALSE;
     }
     else
     {
+        if(dest->has_been_current)
+            ERR("Recreating OpenGL context to share display lists, although the context has been current!\n");
+
         /* Re-create the GLX context and share display lists */
         pglXDestroyContext(gdi_display, dest->ctx);
         dest->ctx = create_glxcontext(gdi_display, dest, org->ctx);

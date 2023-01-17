@@ -2359,9 +2359,17 @@ NTSTATUS WINAPI KeUserModeCallback( ULONG id, const void *args, ULONG len, void 
     if (!__wine_setjmpex( &callback_frame.jmpbuf, NULL ))
     {
         struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
-        void *args_data = (void *)((frame->rsp - len) & ~15);
+        void *args_data = (void *)(((frame->rsp - len) & ~15) - 8);
+        struct {
+            void *args;
+            ULONG id;
+            ULONG len;
+        } *params = (void *)((ULONG_PTR)args_data - 0x10);
 
         memcpy( args_data, args, len );
+        params->args = args_data;
+        params->id = id;
+        params->len = len;
 
         callback_frame.frame.rcx           = id;
         callback_frame.frame.rdx           = (ULONG_PTR)args;
@@ -2370,7 +2378,7 @@ NTSTATUS WINAPI KeUserModeCallback( ULONG id, const void *args, ULONG len, void 
         callback_frame.frame.fs            = fs32_sel;
         callback_frame.frame.gs            = ds64_sel;
         callback_frame.frame.ss            = ds64_sel;
-        callback_frame.frame.rsp           = (ULONG_PTR)args_data - 0x28;
+        callback_frame.frame.rsp           = (ULONG_PTR)params - 0x28;
         callback_frame.frame.rip           = (ULONG_PTR)pKiUserCallbackDispatcher;
         callback_frame.frame.eflags        = 0x200;
         callback_frame.frame.restore_flags = CONTEXT_CONTROL | CONTEXT_INTEGER;
@@ -2908,7 +2916,6 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     EXCEPTION_RECORD rec = { 0 };
     struct xcontext context;
     ucontext_t *ucontext = sigcontext;
-    void *steamclient_addr = NULL;
 
     if (TRAP_sig(ucontext) == TRAP_x86_PROTFLT && ERROR_sig(ucontext) == ((0x29 << 3) | 2))
     {
@@ -2951,11 +2958,6 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         }
         break;
     case TRAP_x86_PAGEFLT:  /* Page fault */
-        if ((steamclient_addr = steamclient_handle_fault( siginfo->si_addr, (ERROR_sig(ucontext) >> 1) & 0x09 )))
-        {
-            RIP_sig(ucontext) = (intptr_t)steamclient_addr;
-            return;
-        }
 
         rec.NumberParameters = 2;
         rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;

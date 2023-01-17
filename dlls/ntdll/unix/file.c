@@ -98,6 +98,16 @@
 #ifdef HAVE_SYS_STATFS_H
 #include <sys/statfs.h>
 #endif
+#ifdef HAVE_ATTR_XATTR_H
+#undef XATTR_ADDITIONAL_OPTIONS
+#include <attr/xattr.h>
+#elif defined(HAVE_SYS_XATTR_H)
+#include <sys/xattr.h>
+#endif
+#ifdef HAVE_SYS_EXTATTR_H
+#undef XATTR_ADDITIONAL_OPTIONS
+#include <sys/extattr.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -353,6 +363,103 @@ NTSTATUS errno_to_status( int err )
         FIXME( "Converting errno %d to STATUS_UNSUCCESSFUL\n", err );
         return STATUS_UNSUCCESSFUL;
     }
+}
+
+#ifndef XATTR_USER_PREFIX
+#define XATTR_USER_PREFIX "user."
+#endif
+#ifndef XATTR_USER_PREFIX_LEN
+#define XATTR_USER_PREFIX_LEN (sizeof(XATTR_USER_PREFIX) - 1)
+#endif
+
+#ifdef HAVE_SYS_EXTATTR_H
+static inline int xattr_valid_namespace( const char *name )
+{
+    if (strncmp( XATTR_USER_PREFIX, name, XATTR_USER_PREFIX_LEN ) != 0)
+    {
+        errno = EPERM;
+        return 0;
+    }
+    return 1;
+}
+#endif
+
+static int xattr_fremove( int filedes, const char *name )
+{
+#if defined(XATTR_ADDITIONAL_OPTIONS)
+    return fremovexattr( filedes, name, 0 );
+#elif defined(HAVE_SYS_XATTR_H) || defined(HAVE_ATTR_XATTR_H)
+    return fremovexattr( filedes, name );
+#elif defined(HAVE_SYS_EXTATTR_H)
+    if (!xattr_valid_namespace( name )) return -1;
+    return extattr_delete_fd( filedes, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN] );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int xattr_fset( int filedes, const char *name, void *value, size_t size )
+{
+#if defined(XATTR_ADDITIONAL_OPTIONS)
+    return fsetxattr( filedes, name, value, size, 0, 0 );
+#elif defined(HAVE_SYS_XATTR_H) || defined(HAVE_ATTR_XATTR_H)
+    return fsetxattr( filedes, name, value, size, 0 );
+#elif defined(HAVE_SYS_EXTATTR_H)
+    if (!xattr_valid_namespace( name )) return -1;
+    return extattr_set_fd( filedes, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN],
+                           value, size );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int xattr_get( const char *path, const char *name, void *value, size_t size )
+{
+#if defined(XATTR_ADDITIONAL_OPTIONS)
+    return getxattr( path, name, value, size, 0, 0 );
+#elif defined(HAVE_SYS_XATTR_H) || defined(HAVE_ATTR_XATTR_H)
+    return getxattr( path, name, value, size );
+#elif defined(HAVE_SYS_EXTATTR_H)
+    if (!xattr_valid_namespace( name )) return -1;
+    return extattr_get_file( path, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN],
+                             value, size );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int xattr_remove( const char *path, const char *name )
+{
+#if defined(XATTR_ADDITIONAL_OPTIONS)
+    return removexattr( path, name, 0 );
+#elif defined(HAVE_SYS_XATTR_H) || defined(HAVE_ATTR_XATTR_H)
+    return removexattr( path, name );
+#elif defined(HAVE_SYS_EXTATTR_H)
+    if (!xattr_valid_namespace( name )) return -1;
+    return extattr_delete_file( path, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN] );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int xattr_set( const char *path, const char *name, void *value, size_t size )
+{
+#if defined(XATTR_ADDITIONAL_OPTIONS)
+    return setxattr( path, name, value, size, 0, 0 );
+#elif defined(HAVE_SYS_XATTR_H) || defined(HAVE_ATTR_XATTR_H)
+    return setxattr( path, name, value, size, 0 );
+#elif defined(HAVE_SYS_EXTATTR_H)
+    if (!xattr_valid_namespace( name )) return -1;
+    return extattr_set_file( path, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN],
+                             value, size );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 /* get space from the current directory data buffer, allocating a new one if necessary */
@@ -1204,15 +1311,15 @@ static BOOLEAN get_dir_case_sensitivity( const char *dir )
  *
  * Check if the specified file should be hidden based on its name and the show dot files option.
  */
-static BOOL is_hidden_file( const UNICODE_STRING *name )
+static BOOL is_hidden_file( const char *name )
 {
-    WCHAR *p, *end;
+    const char *p, *end;
 
     if (show_dot_files) return FALSE;
 
-    end = p = name->Buffer + name->Length/sizeof(WCHAR);
-    while (p > name->Buffer && p[-1] == '\\') p--;
-    while (p > name->Buffer && p[-1] != '\\') p--;
+    end = p = name + strlen( name );
+    while (p > name && p[-1] == '\\') p--;
+    while (p > name && p[-1] != '\\') p--;
     return (p < end && *p == '.');
 }
 
@@ -1436,6 +1543,22 @@ static BOOL append_entry( struct dir_data *data, const char *long_name,
 }
 
 
+/* Match the Samba conventions for storing DOS file attributes */
+#define SAMBA_XATTR_DOS_ATTRIB XATTR_USER_PREFIX "DOSATTRIB"
+/* We are only interested in some attributes, the others have corresponding Unix attributes */
+#define XATTR_ATTRIBS_MASK     (FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM)
+
+/* decode the xattr-stored DOS attributes */
+static inline int get_file_xattr( char *hexattr, int attrlen )
+{
+    if (attrlen > 2 && hexattr[0] == '0' && hexattr[1] == 'x')
+    {
+        hexattr[attrlen] = 0;
+        return strtol( hexattr+2, NULL, 16 ) & XATTR_ATTRIBS_MASK;
+    }
+    return 0;
+}
+
 /* fetch the attributes of a file */
 static inline ULONG get_file_attributes( const struct stat *st )
 {
@@ -1475,11 +1598,45 @@ static int fd_get_file_info( int fd, unsigned int options, struct stat *st, ULON
 }
 
 
+/* set the stat info and file attributes for a file (by file descriptor) */
+NTSTATUS fd_set_file_info( int fd, ULONG attr )
+{
+    char hexattr[11];
+    struct stat st;
+
+    if (fstat( fd, &st ) == -1) return errno_to_status( errno );
+    if (attr & FILE_ATTRIBUTE_READONLY)
+    {
+        if (S_ISDIR( st.st_mode))
+            WARN("FILE_ATTRIBUTE_READONLY ignored for directory.\n");
+        else
+            st.st_mode &= ~0222; /* clear write permission bits */
+    }
+    else
+    {
+        /* add write permission only where we already have read permission */
+        st.st_mode |= (0600 | ((st.st_mode & 044) >> 1)) & (~start_umask);
+    }
+    if (fchmod( fd, st.st_mode ) == -1) return errno_to_status( errno );
+    attr &= ~FILE_ATTRIBUTE_NORMAL; /* do not store everything, but keep everything Samba can use */
+    if (attr != 0)
+    {
+        int len;
+
+        len = sprintf( hexattr, "0x%x", attr );
+        xattr_fset( fd, SAMBA_XATTR_DOS_ATTRIB, hexattr, len );
+    }
+    else
+        xattr_fremove( fd, SAMBA_XATTR_DOS_ATTRIB );
+    return STATUS_SUCCESS;
+}
+
 /* get the stat info and file attributes for a file (by name) */
 static int get_file_info( const char *path, struct stat *st, ULONG *attr )
 {
     char *parent_path;
-    int ret;
+    char hexattr[11];
+    int len, ret;
 
     *attr = 0;
     ret = lstat( path, st );
@@ -1505,6 +1662,16 @@ static int get_file_info( const char *path, struct stat *st, ULONG *attr )
         free( parent_path );
     }
     *attr |= get_file_attributes( st );
+    /* retrieve any stored DOS attributes */
+    len = xattr_get( path, SAMBA_XATTR_DOS_ATTRIB, hexattr, sizeof(hexattr)-1 );
+    if (len == -1)
+    {
+        /* convert Unix-style hidden files to a DOS hidden file attribute */
+        if (is_hidden_file( path ))
+            *attr |= FILE_ATTRIBUTE_HIDDEN;
+        return ret;
+    }
+    *attr |= get_file_xattr( hexattr, len );
     return ret;
 }
 
@@ -2030,11 +2197,6 @@ static NTSTATUS get_dir_data_entry( struct dir_data *dir_data, void *info_ptr, I
     if (class != FileNamesInformation)
     {
         if (st.st_dev != dir_data->id.dev) st.st_ino = 0;  /* ignore inode if on a different device */
-
-        if (!show_dot_files && names->long_name[0] == '.' && names->long_name[1] &&
-            (names->long_name[1] != '.' || names->long_name[2]))
-            attributes |= FILE_ATTRIBUTE_HIDDEN;
-
         fill_file_info( &st, attributes, info, class );
     }
 
@@ -3188,6 +3350,18 @@ static NTSTATUS lookup_unix_name( const WCHAR *name, int name_len, char **buffer
     if (is_unix && (disposition == FILE_OPEN || disposition == FILE_OVERWRITE))
         return STATUS_OBJECT_NAME_NOT_FOUND;
 
+
+    static char *skip_search = NULL;
+    if (skip_search == NULL)
+    {
+        const char *env_var;
+
+				skip_search = getenv("WINE_NO_OPEN_FILE_SEARCH");
+        WARN("Disabling case insensitive search for opening files");
+    }
+    if (skip_search && strcasestr(unix_name, skip_search) && disposition == FILE_OPEN)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
     /* now do it component by component */
 
     while (name_len)
@@ -3848,6 +4022,20 @@ static NTSTATUS unmount_device( HANDLE handle )
     return status;
 }
 
+NTSTATUS set_file_info( const char *path, ULONG attr )
+{
+    char hexattr[11];
+    int len;
+
+    /* Note: unix mode already set when called this way */
+    attr &= ~FILE_ATTRIBUTE_NORMAL; /* do not store everything, but keep everything Samba can use */
+    len = sprintf( hexattr, "0x%x", attr );
+    if (attr != 0 || is_hidden_file( path ))
+        xattr_set( path, SAMBA_XATTR_DOS_ATTRIB, hexattr, len );
+    else
+        xattr_remove( path, SAMBA_XATTR_DOS_ATTRIB );
+    return STATUS_SUCCESS;
+}
 
 /******************************************************************************
  *              open_unix_file
@@ -3933,13 +4121,14 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
         status = STATUS_SUCCESS;
     }
 
-    if (status == STATUS_SUCCESS)
+    if (status != STATUS_SUCCESS)
     {
-        status = open_unix_file( handle, unix_name, access, &new_attr, attributes,
-                                 sharing, disposition, options, ea_buffer, ea_length );
-        free( unix_name );
+        WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), io->u.Status );
+        return status;
     }
-    else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
+
+    status = open_unix_file( handle, unix_name, access, &new_attr, attributes,
+                                   sharing, disposition, options, ea_buffer, ea_length );
 
     if (status == STATUS_SUCCESS)
     {
@@ -3961,6 +4150,11 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
             io->Information = FILE_OVERWRITTEN;
             break;
         }
+        if (io->Information == FILE_CREATED)
+        {
+            /* set any DOS extended attributes */
+            set_file_info( unix_name, attributes );
+        }
     }
     else if (status == STATUS_TOO_MANY_OPENED_FILES)
     {
@@ -3969,6 +4163,7 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
     }
 
     free( nt_name.Buffer );
+    free( unix_name );
     return io->u.Status = status;
 }
 
@@ -4126,7 +4321,6 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
             info->AllocationSize = std.AllocationSize;
             info->EndOfFile      = std.EndOfFile;
             info->FileAttributes = basic.FileAttributes;
-            if (is_hidden_file( attr->ObjectName )) info->FileAttributes |= FILE_ATTRIBUTE_HIDDEN;
         }
         free( unix_name );
     }
@@ -4157,10 +4351,7 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
         else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
             status = STATUS_INVALID_INFO_CLASS;
         else
-        {
             status = fill_file_info( &st, attributes, info, FileBasicInformation );
-            if (is_hidden_file( attr->ObjectName )) info->FileAttributes |= FILE_ATTRIBUTE_HIDDEN;
-        }
         free( unix_name );
     }
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
@@ -4494,7 +4685,6 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
     case FileBasicInformation:
         if (len >= sizeof(FILE_BASIC_INFORMATION))
         {
-            struct stat st;
             const FILE_BASIC_INFORMATION *info = ptr;
             LARGE_INTEGER mtime, atime;
 
@@ -4508,33 +4698,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = set_file_times( fd, &mtime, &atime );
 
             if (status == STATUS_SUCCESS && info->FileAttributes)
-            {
-                if (fstat( fd, &st ) == -1) status = errno_to_status( errno );
-                else
-                {
-                    if (info->FileAttributes & FILE_ATTRIBUTE_READONLY)
-                    {
-                        if (S_ISDIR( st.st_mode))
-                            WARN("FILE_ATTRIBUTE_READONLY ignored for directory.\n");
-                        else
-                            st.st_mode &= ~0222; /* clear write permission bits */
-                    }
-                    else
-                    {
-                        if (is_wine_file(handle))
-                        {
-                            TRACE("HACK: Not giving write permission to wine file!\n");
-                            io->u.Status = STATUS_ACCESS_DENIED;
-                        }
-                        else
-                        {
-                            /* add write permission only where we already have read permission */
-                            st.st_mode |= (0600 | ((st.st_mode & 044) >> 1)) & (~start_umask);
-                        }
-                    }
-                    if (fchmod( fd, st.st_mode ) == -1) status = errno_to_status( errno );
-                }
-            }
+                status = fd_set_file_info( fd, info->FileAttributes );
 
             if (needs_close) close( fd );
         }
@@ -4854,18 +5018,29 @@ void release_fileio( struct async_fileio *io )
 struct async_fileio *alloc_fileio( DWORD size, async_callback_t callback, HANDLE handle )
 {
     /* first free remaining previous fileinfos */
-    struct async_fileio *io = InterlockedExchangePointer( (void **)&fileio_freelist, NULL );
+    struct async_fileio *old_io = InterlockedExchangePointer( (void **)&fileio_freelist, NULL );
+    struct async_fileio *io = NULL;
 
-    while (io)
+    while (old_io)
     {
-        struct async_fileio *next = io->next;
-        free( io );
-        io = next;
+        if (!io && old_io->size >= size && old_io->size <= max(4096, 4 * size))
+        {
+            io     = old_io;
+            size   = old_io->size;
+            old_io = old_io->next;
+        }
+        else
+        {
+            struct async_fileio *next = old_io->next;
+            free( old_io );
+            old_io = next;
+        }
     }
 
-    if ((io = malloc( size )))
+    if (io || (io = malloc( size )))
     {
         io->callback = callback;
+        io->size     = size;
         io->handle   = handle;
     }
     return io;
@@ -7065,8 +7240,59 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
         break;
 
     case FileFsFullSizeInformation:
-        FIXME( "%p: full size info not supported\n", handle );
-        status = STATUS_NOT_IMPLEMENTED;
+        if(length < sizeof(FILE_FS_FULL_SIZE_INFORMATION))
+            io->u.Status = STATUS_BUFFER_TOO_SMALL;
+        else
+        {
+            FILE_FS_FULL_SIZE_INFORMATION *info = buffer;
+
+            if (fstat( fd, &st ) < 0)
+            {
+                io->u.Status = errno_to_status( errno );
+                break;
+            }
+            if(!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
+            {
+                io->u.Status = STATUS_INVALID_DEVICE_REQUEST;
+            }
+            else
+            {
+                ULONGLONG bsize;
+#if !defined(linux) || !defined(HAVE_FSTATFS)
+                struct statvfs stfs;
+
+                if(fstatvfs( fd, &stfs ) < 0)
+                {
+                    io->u.Status = errno_to_status( errno );
+                    break;
+                }
+                bsize = stfs.f_frsize;
+#else
+                struct statfs stfs;
+                if(fstatfs( fd, &stfs ) < 0)
+                {
+                    io->u.Status = errno_to_status( errno );
+                    break;
+                }
+                bsize = stfs.f_bsize;
+#endif
+                if(bsize == 2048)   /* assume CD-ROM */
+                {
+                    info->BytesPerSector = 2048;
+                    info->SectorsPerAllocationUnit = 1;
+                }
+                else
+                {
+                    info->BytesPerSector = 512;
+                    info->SectorsPerAllocationUnit = 8;
+                }
+                info->TotalAllocationUnits.QuadPart = bsize * stfs.f_blocks / (info->BytesPerSector * info->SectorsPerAllocationUnit);
+                info->CallerAvailableAllocationUnits.QuadPart = bsize * stfs.f_bavail / (info->BytesPerSector * info->SectorsPerAllocationUnit);
+                info->ActualAvailableAllocationUnits.QuadPart = bsize * stfs.f_bfree / (info->BytesPerSector * info->SectorsPerAllocationUnit);
+                io->Information = sizeof(*info);
+                io->u.Status = STATUS_SUCCESS;
+            }
+        }
         break;
 
     case FileFsObjectIdInformation:
@@ -7106,9 +7332,20 @@ NTSTATUS WINAPI NtQueryEaFile( HANDLE handle, IO_STATUS_BLOCK *io, void *buffer,
                                BOOLEAN single_entry, void *list, ULONG list_len,
                                ULONG *index, BOOLEAN restart )
 {
-    FIXME( "(%p,%p,%p,%d,%d,%p,%d,%p,%d) stub\n",
+    int fd, needs_close;
+    NTSTATUS status;
+
+    FIXME( "(%p,%p,%p,%d,%d,%p,%d,%p,%d) semi-stub\n",
            handle, io, buffer, length, single_entry, list, list_len, index, restart );
-    return STATUS_ACCESS_DENIED;
+
+    if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+        return status;
+
+    if (buffer && length)
+        memset( buffer, 0, length );
+
+    if (needs_close) close( fd );
+    return STATUS_NO_EAS_ON_FILE;
 }
 
 

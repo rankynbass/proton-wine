@@ -2632,6 +2632,5 @@ ULONG WINAPI RtlNtStatusToDosError( NTSTATUS status )
 
 void CDECL set_unix_env( const char *var, const char *val )
 {
-    if (!val) unsetenv(var);
-    else setenv(var, val, 1);
+    setenv(var, val, 1);
 }

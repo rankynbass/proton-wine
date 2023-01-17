@@ -41,8 +41,6 @@ struct unix_funcs
     TEB *         (WINAPI *NtCurrentTeb)(void);
 #endif
 
-    /* steamclient HACK */
-    void          (CDECL *steamclient_setup_trampolines)( HMODULE src_mod, HMODULE tgt_mod );
     void          (CDECL *set_unix_env)( const char *var, const char *val );
     void          (CDECL *write_crash_log)( const char *log_type, const char *log_msg );
     BOOL          (CDECL *is_pc_in_native_so)( void *pc );

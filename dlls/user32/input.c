@@ -487,7 +487,6 @@ DWORD WINAPI GetQueueStatus( UINT flags )
     return ret;
 }
 
-
 /***********************************************************************
  *		GetInputState   (USER32.@)
  */
