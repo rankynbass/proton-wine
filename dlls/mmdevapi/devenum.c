@@ -255,6 +255,30 @@ static HRESULT set_driver_prop_value(GUID *id, const EDataFlow flow, const PROPE
     return hr;
 }
 
+struct product_name_overrides
+{
+    const WCHAR *id;
+    const WCHAR *product;
+};
+
+static const struct product_name_overrides product_name_overrides[] =
+{
+    /* Sony controllers */
+    { .id = L"VID_054C&PID_0CE6", .product = L"Wireless Controller" },
+};
+
+static const WCHAR *find_product_name_override(const WCHAR *device_id)
+{
+    const WCHAR *match_id = wcschr( device_id, '\\' ) + 1;
+    DWORD i;
+
+    for (i = 0; i < ARRAY_SIZE(product_name_overrides); ++i)
+        if (!wcsnicmp( product_name_overrides[i].id, match_id, 17 ))
+            return product_name_overrides[i].product;
+
+    return NULL;
+}
+
 /* Creates or updates the state of a device
  * If GUID is null, a random guid will be assigned
  * and the device will be created
@@ -321,14 +345,32 @@ static MMDevice *MMDevice_Create(WCHAR *name, GUID *id, EDataFlow flow, DWORD st
 
             pv.vt = VT_LPWSTR;
             pv.pwszVal = name;
+
+            if (SUCCEEDED(set_driver_prop_value(id, flow, &devicepath_key))) {
+                PROPVARIANT pv2;
+
+                PropVariantInit(&pv2);
+
+                if (SUCCEEDED(MMDevice_GetPropValue(id, flow, &devicepath_key, &pv2)) && pv2.vt == VT_LPWSTR) {
+                    const WCHAR *override;
+                    if ((override = find_product_name_override(pv2.pwszVal)) != NULL)
+                        pv.pwszVal = (WCHAR*) override;
+                }
+
+                PropVariantClear(&pv2);
+            }
+
             MMDevice_SetPropValue(id, flow, (const PROPERTYKEY*)&DEVPKEY_Device_FriendlyName, &pv);
             MMDevice_SetPropValue(id, flow, (const PROPERTYKEY*)&DEVPKEY_DeviceInterface_FriendlyName, &pv);
             MMDevice_SetPropValue(id, flow, (const PROPERTYKEY*)&DEVPKEY_Device_DeviceDesc, &pv);
 
+            if (wcscmp(name, L"Wireless Controller") == 0) {
+              pv.pwszVal = L"{12345678-9ABC-DEF0-1234-56789ABCDEF0}";
+              MMDevice_SetPropValue(id, flow, (const PROPERTYKEY*)&DEVPKEY_Device_ContainerId, &pv);
+            }
+
             pv.pwszVal = guidstr;
             MMDevice_SetPropValue(id, flow, &deviceinterface_key, &pv);
-
-            set_driver_prop_value(id, flow, &devicepath_key);
 
             if (FAILED(set_driver_prop_value(id, flow, &PKEY_AudioEndpoint_FormFactor)))
             {
@@ -1418,8 +1460,27 @@ static HRESULT WINAPI MMDevPropStore_GetValue(IPropertyStore *iface, REFPROPERTY
     }
 
     hres = MMDevice_GetPropValue(&This->parent->devguid, This->parent->flow, key, pv);
+
     if (FAILED(hres))
         return hres;
+
+    /* Clients apps expect a CLSID */
+    if(IsEqualPropertyKey(*key,DEVPKEY_Device_ContainerId) && pv->vt == VT_LPWSTR && pv->pwszVal) {
+        LPWSTR guidstr = pv->pwszVal;
+
+        pv->puuid = CoTaskMemAlloc(sizeof(*pv->puuid));
+        if (!pv->puuid)
+          return E_OUTOFMEMORY;
+
+        hres = CLSIDFromString(guidstr, pv->puuid);
+        if (FAILED(hres))
+          return hres;
+
+        pv->vt = VT_CLSID;
+        CoTaskMemFree(guidstr);
+
+        return hres;
+    }
 
     if (WARN_ON(mmdevapi))
     {
