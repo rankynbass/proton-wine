@@ -3295,9 +3295,9 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
         static const char version[] = PACKAGE_VERSION;
         struct utsname buf;
 
-        uname( &buf );
-        len = strlen(version) + strlen(wine_build) + strlen(buf.sysname) + strlen(buf.release) + 4;
-        snprintf( info, size, "%s%c%s%c%s%c%s", version, 0, wine_build, 0, buf.sysname, 0, buf.release );
+        //uname( &buf );
+        len = strlen(version) + strlen(wine_build) + strlen("Darwin") + strlen("Darwin Kernel") + 4;
+        snprintf( info, size, "%s%c%s%c%s%c%s", version, 0, wine_build, 0, "Darwin", 0, "Darwin Kernel" );
         if (size < len) ret = STATUS_INFO_LENGTH_MISMATCH;
         break;
     }
