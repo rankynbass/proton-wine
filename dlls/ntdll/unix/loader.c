@@ -2231,7 +2231,6 @@ BOOL fsync_simulate_sched_quantum;
 BOOL alert_simulate_sched_quantum;
 BOOL no_priv_elevation;
 BOOL localsystem_sid;
-BOOL high_dll_addresses;
 BOOL simulate_writecopy;
 
 static void hacks_init(void)
@@ -2282,14 +2281,6 @@ static void hacks_init(void)
     env_str = getenv("WINE_UNIX_PC_AS_NTDLL");
     if (env_str)  report_native_pc_as_ntdll = atoi(env_str);
     else if (sgi) report_native_pc_as_ntdll = !strcmp(sgi, "700330");
-
-#ifdef _WIN64
-    env_str = getenv("WINE_HIGH_DLL_ADDRESSES");
-    if (env_str)  high_dll_addresses = atoi(env_str);
-    else if (sgi) high_dll_addresses = !strcmp(sgi, "1938010");
-    if (high_dll_addresses)
-        ERR("HACK: moving dlls to high addresses.\n");
-#endif
 
     env_str = getenv("WINE_SIMULATE_WRITECOPY");
     if (env_str) simulate_writecopy = atoi(env_str);
