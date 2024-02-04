@@ -111,7 +111,7 @@ struct dll_dir_entry
 
 static struct list dll_dir_list = LIST_INIT( dll_dir_list );  /* extra dirs from LdrAddDllDirectory */
 
-static BOOL hide_wine_exports = FALSE;  /* try to hide ntdll wine exports from applications */
+static BOOL hide_wine_exports = TRUE;  /* try to hide ntdll wine exports from applications */
 
 struct ldr_notification
 {

@@ -2781,15 +2781,51 @@ DWORD WINAPI GetPerAdapterInfo( ULONG index, IP_PER_ADAPTER_INFO *info, ULONG *s
  * RETURNS
  *  Success: TRUE
  *  Failure: FALSE
- *
- * FIXME
- *  Stub, returns FALSE.
  */
-BOOL WINAPI GetRTTAndHopCount(IPAddr DestIpAddress, PULONG HopCount, ULONG MaxHops, PULONG RTT)
-{
-  FIXME("(DestIpAddress 0x%08lx, HopCount %p, MaxHops %ld, RTT %p): stub\n",
-   DestIpAddress, HopCount, MaxHops, RTT);
-  return FALSE;
+BOOL WINAPI GetRTTAndHopCount( IPAddr DestIpAddress, PULONG HopCount, ULONG MaxHops, PULONG RTT )
+{    
+    char send_buffer[0x20] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    char receive_buffer[sizeof(ICMP_ECHO_REPLY) + sizeof(send_buffer)];
+    const DWORD timeout = 5000;
+    DWORD replies;
+    IP_OPTION_INFORMATION send_options = { 0 };
+    PICMP_ECHO_REPLY reply;
+    HANDLE icmp_handle;
+
+    TRACE( "(DestIpAddress 0x%08lx, HopCount %p, MaxHops %ld, RTT %p)\n",
+        DestIpAddress, HopCount, MaxHops, RTT );
+
+    if (!HopCount || !RTT || DestIpAddress == INADDR_NONE)
+        return FALSE;
+
+    if ((icmp_handle = IcmpCreateFile()) == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    for (send_options.Ttl = 1; send_options.Ttl <= MaxHops; send_options.Ttl++) 
+    {
+        replies = IcmpSendEcho( icmp_handle, DestIpAddress, send_buffer, sizeof(send_buffer),
+                                &send_options, receive_buffer, sizeof(receive_buffer), timeout );
+
+        if (!replies) 
+        {
+            if (GetLastError() == IP_TTL_EXPIRED_TRANSIT) continue;
+            if (GetLastError() == IP_REQ_TIMED_OUT) continue;
+            break;
+        }
+
+        reply = (PICMP_ECHO_REPLY)receive_buffer;
+
+        if (reply->Status == IP_SUCCESS) 
+        {
+            *HopCount = send_options.Ttl;
+            *RTT = reply->RoundTripTime;
+            IcmpCloseHandle( icmp_handle );
+            return TRUE;
+        }
+    }
+
+    IcmpCloseHandle( icmp_handle );
+    return FALSE;
 }
 
 /******************************************************************
